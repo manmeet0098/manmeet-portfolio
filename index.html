@@ -74,7 +74,7 @@
   }
   .intro-photo {
     flex-shrink: 0;
-    width: 200px;
+    width: clamp(120px, 30vw, 200px);
     margin-top: -35px;
     position: relative;
   }
@@ -119,7 +119,7 @@
   }
   @media (max-width: 700px) {
     .intro-row { flex-direction: column-reverse; }
-    .intro-photo { width: 160px; align-self: center; }
+    .intro-photo { align-self: center; }
   }
 
   .intro h1 {

@@ -345,24 +345,14 @@
     .edu-row .school-badge { height: 28px; }
     .snaps-grid { grid-template-columns: 1fr; gap: 36px; }
   }
+  @media (max-width: 700px) {
+    .hover-hint { display: none; }
+    .snap .frame { filter: none; }
+    .snap .frame::after { display: none; }
+  }
   @media (hover: none) {
     .snap .frame { filter: grayscale(0) contrast(1); }
     .snap .frame::after { top: 85%; }
-  }
-  .scroll-hint { display: none; }
-  @media (hover: none) {
-    .hover-hint { display: none; }
-    .scroll-hint { display: inline; }
-    .snap .frame {
-      filter: grayscale(1) contrast(0.95);
-      transition: filter 0.8s ease;
-    }
-    .snap .frame::after {
-      top: 100%;
-      transition: top 0.8s cubic-bezier(0.65, 0, 0.35, 1);
-    }
-    .snap.in-view .frame { filter: grayscale(0) contrast(1); }
-    .snap.in-view .frame::after { top: 0%; }
   }
 </style>
 </head>
@@ -418,7 +408,7 @@
 
   <section class="snaps" id="snaps">
     <p class="label label-lg">snaps</p>
-    <p class="snaps-intro">A small archive of notable events and achievements. <span class="hover-hint">Hover over any photo.</span><span class="scroll-hint">Photos reveal as you scroll.</span></p>
+    <p class="snaps-intro">A small archive of notable events and achievements. <span class="hover-hint">Hover over any photo.</span></p>
 
     <div class="snaps-grid">
       <figure class="snap s1">
@@ -456,15 +446,5 @@
 
 </div>
 
-  <script>
-    if (window.matchMedia('(hover: none)').matches) {
-      const io = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-          if (entry.isIntersecting) entry.target.classList.add('in-view');
-        });
-      }, { threshold: 0.35 });
-      document.querySelectorAll('.snap').forEach(el => io.observe(el));
-    }
-  </script>
 </body>
 </html>

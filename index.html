@@ -372,10 +372,48 @@
 
   .bb-overlay {
     position: fixed; inset: 0; z-index: 50; overflow: hidden;
-    cursor: grab; touch-action: none;
+    cursor: default; touch-action: none;
     user-select: none; -webkit-user-select: none;
   }
-  .bb-overlay.is-dragging { cursor: grabbing; }
+  .bb-overlay.has-hammer,
+  .bb-overlay.has-hammer .bb-piece { cursor: none; }
+  .bb-overlay.is-dragging,
+  .bb-overlay.is-dragging .bb-piece { cursor: grabbing; }
+
+  /* the hammer is drawn on the page (cursor images can't be this big); impact ticks and chips */
+  .bb-hammer,
+  .bb-tap-hammer {
+    position: fixed; left: 0; top: 0; z-index: 59;
+    pointer-events: none;
+    filter: drop-shadow(0 0 1px rgba(240, 238, 233, 0.9)) drop-shadow(0 6px 5px rgba(31, 29, 26, 0.22));
+  }
+  .bb-hammer { will-change: transform; }
+  .bb-hammer[hidden] { display: none; }
+  .bb-hammer svg,
+  .bb-tap-hammer svg { display: block; overflow: visible; }
+  .bb-tap-hammer .bb-hh { transform-box: view-box; transform-origin: 52px 40px; }
+  .bb-impact {
+    position: fixed; z-index: 58; width: 60px; height: 60px; margin: -30px 0 0 -30px;
+    pointer-events: none;
+    animation: bbImpact 0.32s ease-out forwards;
+  }
+  .bb-impact svg { display: block; }
+  @keyframes bbImpact {
+    from { transform: scale(0.5); opacity: 1; }
+    to { transform: scale(1.35); opacity: 0; }
+  }
+  .bb-chip { position: fixed; z-index: 57; pointer-events: none; margin: -2px 0 0 -2px; }
+  .bb-ring {
+    position: fixed; z-index: 57; width: 130px; height: 130px; margin: -65px 0 0 -65px;
+    border: 2px solid var(--muted); border-radius: 50%;
+    pointer-events: none;
+    animation: bbRing 0.36s ease-out forwards;
+  }
+  @keyframes bbRing {
+    from { transform: scale(0.1); opacity: 0.55; }
+    to { transform: scale(1); opacity: 0; }
+  }
+  .bb-ui:not(.bb-ui--note) .bb-note { border: 0; padding: 2px 8px; margin-top: 6px; }
   .bb-overlay.bb-shake { animation: bbShake 0.26s linear; }
   @keyframes bbShake {
     0%, 100% { transform: translate(0, 0); }
@@ -519,9 +557,12 @@
 
 
 <script>
-/* ---- break this page ----
-   Click "break things" in the intro: everything on screen falls (Matter.js physics,
-   loaded only on first click). "build it back" (or Esc) flies the pieces home.
+/* ---- break this page (hammer version) ----
+   Click "break things" in the intro: a random half of what's on screen breaks loose
+   (Matter.js physics, loaded only on first click) and a big hammer follows the mouse.
+   Hit anything still standing to knock it loose too. A quick hit on a fallen piece
+   sends it flying; hold or drag it to pick it up instead.
+   "build it back" (or Esc) flies the pieces home.
    Reduced-motion visitors, or a failed library load, get the "unstyled" break instead.
    ?mode=css or ?mode=gravity in the URL forces a mode (handy for testing). */
 (() => {
@@ -529,6 +570,21 @@
   const MATTER_SRI = 'sha512-0z8URjGET6GWnS1xcgiLBZBzoaS8BNlKayfZyQNKz4IRp+s7CKXx0yz7Eco2+TcwoeMBa5KMwmTX7Kus7Fa5Uw==';
   const forced = new URLSearchParams(location.search).get('mode');
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  // the hammer in its striking pose: handle level, head down, striking face centred on (16, 57)
+  const H = { face: [16, 57], pivot: [52, 40], rest: 35, wind: 58 };
+  const HAMMER_ART =
+    '<rect x="20" y="37.25" width="40" height="5.5" rx="2.75" fill="#e7dece" stroke="#1f1d1a" stroke-width="1.5"/>' +
+    '<rect x="43" y="35.75" width="18.5" height="8.5" rx="3.4" fill="#1f1d1a"/>' +
+    '<path d="M47.5 36.5v7M51.5 36.5v7M55.5 36.5v7" stroke="#4a4540" stroke-width="1"/>' +
+    '<rect x="7.5" y="21" width="17" height="33" rx="2" fill="#d94f2a" stroke="#1f1d1a" stroke-width="1.5"/>' +
+    '<rect x="6.25" y="51" width="19.5" height="6" rx="1.6" fill="#1f1d1a"/>' +
+    '<rect x="6.25" y="18" width="19.5" height="6" rx="1.6" fill="#1f1d1a"/>' +
+    '<path d="M11.5 28v18" stroke="#f0eee9" stroke-width="1.6" stroke-linecap="round" opacity=".5"/>';
+  const AIM = '<path d="M16 52.5v9M11.5 57h9" stroke="#d94f2a" stroke-width="1.3" stroke-linecap="round"/>';
+  const hammerSvg = (size, aim) => `<svg width="${size}" height="${size}" viewBox="0 0 64 64" aria-hidden="true">` +
+                                   `${aim ? AIM : ''}<g class="bb-hh">${HAMMER_ART}</g></svg>`;
+  const IMPACT_SVG = '<svg width="60" height="60" viewBox="0 0 28 28" aria-hidden="true" fill="none" stroke="#d94f2a" ' +
+                     'stroke-width="1.6" stroke-linecap="round"><path d="M9.3 12.3 3.7 10.2M11.9 9.5 9.4 4M16.1 9.5 18.6 4M18.7 12.3 24.3 10.2"/></svg>';
 
   const html = document.documentElement;
   const wrap = document.querySelector('.wrap');
@@ -571,6 +627,236 @@
     lastWidth = innerWidth;
   });
 
+  /* ---------- the hammer ----------
+     Presses are caught in the capture phase, before Matter's drag handler sees them.
+     On anything still standing, or on empty space, the hammer swings straight away.
+     On a fallen piece it winds up instead: let go quickly and it whacks the piece;
+     hold, or start dragging, and you pick the piece up. */
+  const SWING_MS = 55, HOLD_MS = 240, DRAG_PX = 6;
+  let press = null;     // { id, touch, x, y, p, pending, dragging, timer, tapEl }
+  let mouseAt = null;   // where the mouse is, so the hammer can follow it (and start where it is)
+
+  addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    mouseAt = { x: e.clientX, y: e.clientY, inside: !!sim && sim.overlay.contains(e.target) };
+  }, { capture: true, passive: true });
+  document.addEventListener('mouseout', (e) => { if (!e.relatedTarget && mouseAt) mouseAt.inside = false; });
+
+  const onDown = (e) => {
+    if (state !== 'broken' || !sim || !sim.overlay.contains(e.target)) return;
+    const touch = !!e.changedTouches;
+    if (!touch && e.button !== 0) return;
+    e.stopPropagation();
+    if (touch) e.preventDefault();        // no emulated mouse events after a tap
+    const pt = touch ? e.changedTouches[0] : e;
+    const x = pt.clientX, y = pt.clientY;
+    const el = e.target.closest('.bb-piece');
+    const p = el && sim.byEl.get(el);
+    if (touch && mouseAt) mouseAt.inside = false;
+    if (press && press.dragging) return swing({ x, y, p, touch });   // another finger, mid-drag: just hit
+    if (press) endPress(true);
+    press = { id: touch ? pt.identifier : 'mouse', touch, x, y, p };
+    if (p && !p.intact) {
+      press.pending = true;
+      press.timer = setTimeout(() => startDrag(press.x, press.y), HOLD_MS);
+      if (touch) {
+        press.tapEl = tapHammer(x, y);
+        press.tapEl.querySelector('.bb-hh').style.transform = `rotate(${H.wind}deg)`;
+      } else if (sim.hammer) sim.hammer.wind();
+    } else {
+      swing(press);
+    }
+  };
+  const findTouch = (e) => [...e.changedTouches].find((t) => t.identifier === press.id);
+  const onMove = (e) => {
+    if (!press || state !== 'broken') return;
+    const touch = !!e.changedTouches;
+    if (touch !== press.touch) return;
+    const pt = touch ? findTouch(e) : e;
+    if (press.dragging) {
+      if (!touch && e.buttons === 0) { sim.drop(e); endPress(false); }   // let go outside the window
+      else if (touch && !pt) e.stopPropagation();
+      return;                              // otherwise Matter moves the piece
+    }
+    if (pt && press.pending && Math.hypot(pt.clientX - press.x, pt.clientY - press.y) > DRAG_PX) {
+      startDrag(pt.clientX, pt.clientY);
+      return;
+    }
+    if (touch) e.stopPropagation();        // a sliding finger shouldn't grab what it passes over
+  };
+  const onUp = (e) => {
+    if (!press) return;
+    const touch = !!e.changedTouches;
+    if (touch !== press.touch || (touch && !findTouch(e)) || (!touch && e.button !== 0)) return;
+    // Matter only hears mouseups on the overlay (and no touchcancel): drop the piece either way
+    if (press.dragging && (e.type === 'touchcancel' || (!touch && !sim.overlay.contains(e.target)))) sim.drop(e);
+    endPress(e.type !== 'touchcancel');
+  };
+  addEventListener('mousedown', onDown, true);
+  addEventListener('touchstart', onDown, { capture: true, passive: false });
+  addEventListener('mousemove', onMove, true);
+  addEventListener('touchmove', onMove, true);
+  addEventListener('mouseup', onUp, true);
+  addEventListener('touchend', onUp, true);
+  addEventListener('touchcancel', onUp, true);
+
+  function endPress(whack) {
+    const pr = press;
+    press = null;
+    clearTimeout(pr.timer);
+    if (pr.pending && whack) swing(pr);   // a quick hit on a fallen piece
+    else if (pr.tapEl) pr.tapEl.remove();
+    if (!pr.touch && sim && sim.hammer) sim.hammer.release();
+  }
+  function startDrag(x, y) {
+    const pr = press;
+    if (!pr || !pr.pending || !sim) return;
+    clearTimeout(pr.timer);
+    pr.pending = false;
+    pr.dragging = true;
+    if (pr.tapEl) { pr.tapEl.remove(); pr.tapEl = null; }
+    if (sim.hammer) sim.hammer.release();
+    sim.grab(pr.p, x, y);
+  }
+  function cancelPress() {
+    if (!press) return;
+    clearTimeout(press.timer);
+    if (press.tapEl) press.tapEl.remove();
+    press = null;
+  }
+
+  // the hammer comes down, and the blow lands when it gets there
+  function swing(pr) {
+    const { x, y, p, touch } = pr;
+    if (touch) {
+      const h = pr.tapEl || tapHammer(x, y);
+      const from = pr.tapEl ? H.wind : H.rest;
+      pr.tapEl = null;
+      h.querySelector('.bb-hh').animate([
+        { transform: `rotate(${from}deg)`, easing: 'cubic-bezier(0.55, 0, 1, 0.45)' },
+        { transform: 'rotate(-5deg)', offset: SWING_MS / (SWING_MS + 60) },
+        { transform: 'rotate(0deg)' },
+      ], { duration: SWING_MS + 60, fill: 'forwards' });
+      h.animate([{ opacity: 1 }, { opacity: 1, offset: 0.55 }, { opacity: 0 }], { duration: 440, fill: 'forwards' })
+        .onfinish = () => h.remove();
+    } else if (sim.hammer) {
+      sim.hammer.slam();
+    }
+    setTimeout(() => { if (state === 'broken' && sim) impact(x, y, p, touch); }, SWING_MS);
+  }
+
+  function impact(x, y, p, touch) {
+    const res = sim.slam(x, y, p, touch);
+    const solid = res.standing > 0 || !!res.whacked;
+    if (solid) sim.freezeUntil = performance.now() + 70;    // a beat of stillness sells the hit
+    shake(solid ? 7 : res.kicked ? 3 : 2);
+    const fx = document.createElement('div');
+    fx.className = 'bb-impact';
+    fx.style.left = x + 'px';
+    fx.style.top = y + 'px';
+    fx.innerHTML = IMPACT_SVG;
+    fx.addEventListener('animationend', () => fx.remove());
+    document.body.appendChild(fx);
+    if (solid) {                           // a shockwave ring on anything that actually got hit
+      const ring = document.createElement('div');
+      ring.className = 'bb-ring';
+      ring.style.left = x + 'px';
+      ring.style.top = y + 'px';
+      ring.addEventListener('animationend', () => ring.remove());
+      document.body.appendChild(ring);
+    }
+    const src = res.whacked || p;
+    const colour = !src ? '#d9d3c5'
+      : src.kind === 'word' ? src.el.style.color
+      : src.kind === 'rule' ? src.el.style.background : '#6e6960';
+    chips(x, y, colour, solid ? 16 : res.kicked ? 8 : 4);
+  }
+
+  function shake(px) {
+    const f = [];
+    for (let k = 0; k < 6; k++) {
+      const d = px * (1 - k / 6);
+      f.push({ transform: `translate(${((Math.random() * 2 - 1) * d).toFixed(1)}px, ${((Math.random() * 2 - 1) * d).toFixed(1)}px)` });
+    }
+    f.push({ transform: 'translate(0, 0)' });
+    sim.overlay.animate(f, { duration: 260, easing: 'linear' });
+  }
+
+  // little flakes of whatever got hit, thrown up and out
+  function chips(x, y, colour, n) {
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('span');
+      c.className = 'bb-chip';
+      const w = 2 + Math.random() * 4.5;
+      c.style.cssText = `left:${x}px;top:${y}px;width:${w.toFixed(1)}px;height:${(w * (0.5 + Math.random() * 0.8)).toFixed(1)}px;` +
+                        `background:${i % 5 === 4 ? '#d94f2a' : colour}`;
+      const a = -Math.PI * (0.08 + Math.random() * 0.84);
+      const v = 180 + Math.random() * 300, vx = Math.cos(a) * v, vy = Math.sin(a) * v;
+      const T = 0.42 + Math.random() * 0.26, spin = (Math.random() - 0.5) * 900;
+      const frames = [];
+      for (let k = 0; k <= 6; k++) {
+        const t = (T * k) / 6;
+        frames.push({ transform: `translate(${(vx * t).toFixed(1)}px, ${(vy * t + 750 * t * t).toFixed(1)}px) rotate(${(spin * k / 6).toFixed(0)}deg)`,
+                      opacity: k < 4 ? 1 : 1 - (k - 3) / 3 });
+      }
+      document.body.appendChild(c);
+      c.animate(frames, { duration: T * 1000 }).onfinish = () => c.remove();
+    }
+  }
+
+  // touch screens have no cursor, so a hammer appears where the finger lands
+  function tapHammer(x, y) {
+    const S = 96, k = S / 64;
+    const h = document.createElement('div');
+    h.className = 'bb-tap-hammer';
+    h.style.transform = `translate(${x - H.face[0] * k}px, ${y - H.face[1] * k}px)`;
+    h.innerHTML = hammerSvg(S, false);
+    document.body.appendChild(h);
+    return h;
+  }
+
+  // the mouse hammer: follows the pointer, sways a little as it moves, swings on click
+  function deskHammer() {
+    const S = 104, k = S / 64;
+    const el = document.createElement('div');
+    el.className = 'bb-hammer';
+    el.hidden = true;
+    el.innerHTML = hammerSvg(S, true);
+    document.body.appendChild(el);
+    const g = el.querySelector('.bb-hh');
+    let mode = 'rest', t0 = 0, from = 0, angle = H.rest, spin = 0, held = false;
+    let px = null, py = 0, vx = 0, vy = 0;
+    return {
+      el,
+      wind() { mode = 'wind'; held = true; },
+      slam() { mode = 'slam'; from = angle; t0 = performance.now(); held = true; },
+      release() { held = false; if (mode === 'wind') mode = 'rest'; },
+      frame(now, show) {
+        if (!mouseAt) return;
+        const { x, y } = mouseAt;
+        if (px !== null) { vx = vx * 0.6 + (x - px) * 0.4; vy = vy * 0.6 + (y - py) * 0.4; }
+        px = x; py = y;
+        if (mode === 'slam') {
+          const t = Math.min(1, (now - t0) / SWING_MS);
+          angle = from + (-5 - from) * t * t;          // speeds up into the blow
+          if (t >= 1) { mode = 'down'; t0 = now; }
+        } else if (mode === 'down') {
+          angle = -5 + 5 * Math.min(1, (now - t0) / 70);
+          if (!held && now - t0 > 90) { mode = 'rest'; spin = 0; }
+        } else {
+          // the heavy head lags behind the hand
+          const sway = Math.max(-16, Math.min(16, -vx * 0.9 + vy * 0.6));
+          spin = (spin + ((mode === 'wind' ? H.wind : H.rest) + sway - angle) * 0.2) * 0.7;
+          angle += spin;
+        }
+        el.hidden = !show;
+        if (!show) return;
+        g.setAttribute('transform', `rotate(${angle.toFixed(2)} ${H.pivot[0]} ${H.pivot[1]})`);
+        el.style.transform = `translate(${(x - H.face[0] * k).toFixed(1)}px, ${(y - H.face[1] * k).toFixed(1)}px)`;
+      },
+    };
+  }
+
   function loadMatter() {
     if (window.Matter) return Promise.resolve(window.Matter);
     return new Promise((resolve, reject) => {
@@ -587,7 +873,7 @@
 
   /* ---------- gravity break ---------- */
   function breakGravity(M) {
-    const { Engine, Bodies, Body, Composite, Mouse, MouseConstraint, Events } = M;
+    const { Engine, Bodies, Body, Composite, Mouse, MouseConstraint, Events, Sleeping } = M;
     clearCrooked();
     hideNote();
 
@@ -595,7 +881,7 @@
     const pieces = collectPieces(vw, vh);
 
     const overlay = document.createElement('div');
-    overlay.className = 'bb-overlay bb-shake';
+    overlay.className = 'bb-overlay bb-shake has-hammer';
     overlay.setAttribute('aria-hidden', 'true');
     for (const p of pieces) {
       p.el.style.width = p.w + 'px';
@@ -609,12 +895,21 @@
 
     const engine = Engine.create({ enableSleeping: true, positionIterations: 8 });
     engine.gravity.y = 1.1;
-    const T = 400;
+    const T = 400, WALLS = 0x0002;
+    const wall = { isStatic: true, collisionFilter: { category: WALLS } };
     Composite.add(engine.world, [
-      Bodies.rectangle(vw / 2, vh + T / 2, vw * 3, T, { isStatic: true }),     // floor
-      Bodies.rectangle(-T / 2, vh / 2 - vh, T, vh * 4, { isStatic: true }),     // left wall
-      Bodies.rectangle(vw + T / 2, vh / 2 - vh, T, vh * 4, { isStatic: true }), // right wall
+      Bodies.rectangle(vw / 2, vh + T / 2, vw * 3, T, wall),     // floor
+      Bodies.rectangle(-T / 2, vh / 2 - vh, T, vh * 4, wall),     // left wall
+      Bodies.rectangle(vw + T / 2, vh / 2 - vh, T, vh * 4, wall), // right wall
     ]);
+
+    // a random half breaks loose now; the rest stays standing, cracked, waiting for the hammer
+    const order = [...pieces];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    order.forEach((p, i) => { p.intact = i >= Math.ceil(order.length / 2); });
 
     const timers = [];
     for (const p of pieces) {
@@ -631,15 +926,75 @@
       p.body = p.shape === 'circle'
         ? Bodies.circle(cx, cy, p.w / 2, opts)
         : Bodies.rectangle(cx, cy, p.w, p.bodyH || p.h, opts);
+      if (p.intact) {
+        p.tilt = (Math.random() - 0.5) * 0.05;          // about ±1.4°
+        p.el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.tilt}rad)`;
+        continue;
+      }
       // bottom of the screen lets go first, then the cascade works upward
       const depth = 1 - Math.min(1, Math.max(0, cy / vh));
       const delay = 140 + depth * 380 + Math.random() * 160;
       timers.push(setTimeout(() => {
         Composite.add(engine.world, p.body);
+        p.live = true;
         Body.setVelocity(p.body, { x: (Math.random() - 0.5) * 2.4, y: -Math.random() * 1.5 });
         Body.setAngularVelocity(p.body, (Math.random() - 0.5) * 0.06);
+        p.el.classList.add('is-loose');
+        p.el.style.zIndex = '2';
       }, delay));
     }
+
+    // knock a standing piece loose: a pop up and away from where the hammer landed
+    const loosen = (p, hx) => {
+      p.intact = false;
+      p.live = true;
+      const away = Math.max(-1, Math.min(1, (p.x + p.w / 2 - hx) / 40));
+      Body.setAngle(p.body, p.tilt || 0);
+      Composite.add(engine.world, p.body);
+      Body.setVelocity(p.body, { x: away * 4 + (Math.random() - 0.5), y: -(5 + Math.random() * 4) });
+      Body.setAngularVelocity(p.body, (Math.random() - 0.5) * (p.kind === 'rule' ? 0.02 : 0.25));
+      p.el.classList.add('is-loose');
+      p.el.style.zIndex = '2';
+    };
+    // a blow loosens the standing piece it lands on (plus anything within r px), sends a fallen
+    // piece under the hammer flying, and kicks the debris around it
+    const slam = (x, y, target, touch) => {
+      const r = touch ? 20 : 16, R = touch ? 140 : 120;
+      const res = { standing: 0, whacked: null, kicked: 0 };
+      const fresh = new Set();
+      for (const p of pieces) {
+        if (!p.intact) continue;
+        const dx = Math.max(p.x - x, 0, x - (p.x + p.w));
+        const dy = Math.max(p.y - y, 0, y - (p.y + p.h));
+        if (p === target || dx * dx + dy * dy <= r * r) { loosen(p, x); fresh.add(p); res.standing++; }
+      }
+      for (const p of pieces) {
+        if (p.intact || !p.live || fresh.has(p)) continue;
+        const b = p.body;
+        const dx = Math.max(b.bounds.min.x - x, 0, x - b.bounds.max.x);
+        const dy = Math.max(b.bounds.min.y - y, 0, y - b.bounds.max.y);
+        const d = Math.hypot(dx, dy);
+        if (p !== target && d >= R) continue;
+        const k = p.kind === 'media' ? 0.6 : p.kind === 'rule' ? 0.5 : 1;
+        const away = Math.max(-1, Math.min(1, (b.position.x - x) / 40));
+        Sleeping.set(b, false);
+        if (p === target) {
+          Body.setVelocity(b, { x: (away * 5 + (Math.random() - 0.5) * 4) * k, y: -(14 + Math.random() * 4) * k });
+          Body.setAngularVelocity(b, (Math.random() - 0.5) * (p.kind === 'rule' ? 0.04 : 0.35));
+          // for a moment it passes through the other debris, so it flies out of the pile
+          b.collisionFilter.mask = WALLS;
+          setTimeout(() => { b.collisionFilter.mask = 0xFFFFFFFF; }, 200);
+          res.whacked = p;
+        } else {
+          const f = 1 - d / R;
+          Body.setVelocity(b, { x: b.velocity.x + away * 6 * f * k, y: Math.min(b.velocity.y, 0) - (4 + 8 * f) * k });
+          Body.setAngularVelocity(b, b.angularVelocity + (Math.random() - 0.5) * 0.2 * f);
+          res.kicked++;
+        }
+      }
+      if (res.standing && !pieces.some((p) => p.intact)) note.textContent = 'nothing left to break.';
+      return res;
+    };
 
     const mouse = Mouse.create(overlay);
     const grab = MouseConstraint.create(engine, {
@@ -649,27 +1004,47 @@
     Composite.add(engine.world, grab);
     Events.on(grab, 'startdrag', () => overlay.classList.add('is-dragging'));
     Events.on(grab, 'enddrag', () => overlay.classList.remove('is-dragging'));
+    // presses never reach Matter (the hammer handles them), so picking a piece up happens here
+    const grabPiece = (p, x, y) => {
+      const b = p.body, c = grab.constraint;
+      Sleeping.set(b, false);
+      mouse.button = 0;
+      mouse.position.x = x;
+      mouse.position.y = y;
+      c.pointA = mouse.position;
+      c.bodyB = grab.body = b;
+      c.pointB = { x: x - b.position.x, y: y - b.position.y };
+      c.angleB = b.angle;
+      Events.trigger(grab, 'startdrag', { mouse, body: b });
+    };
 
     const STEP = 1000 / 60;
     let last = performance.now(), acc = 0;
     const tick = (now) => {
       acc += Math.min(100, now - last);
       last = now;
+      if (now < sim.freezeUntil) acc = 0;
       let n = 0;
       while (acc >= STEP && n++ < 4) { Engine.update(engine, STEP); acc -= STEP; }
       if (n >= 4) acc = 0;
       for (const p of pieces) {
+        if (p.intact) continue;
         const b = p.body;
         p.el.style.transform =
           `translate(${b.position.x - p.w / 2}px, ${b.position.y - p.h / 2}px) rotate(${b.angle}rad)`;
       }
+      sim.hammer.frame(now, !!mouseAt && mouseAt.inside && !overlay.classList.contains('is-dragging'));
       sim.raf = requestAnimationFrame(tick);
     };
-    sim = { overlay, pieces, timers, raf: requestAnimationFrame(tick) };
+    sim = { overlay, pieces, timers, slam, grab: grabPiece, drop: (e) => mouse.mouseup(e), freezeUntil: 0,
+            hammer: deskHammer(), byEl: new Map(pieces.map((p) => [p.el, p])),
+            raf: requestAnimationFrame(tick) };
+    if (mouseAt) mouseAt.inside = true;     // the hammer starts wherever the mouse already is
     setTimeout(() => overlay.classList.remove('bb-shake'), 300);
 
     state = 'broken';
     ui.classList.remove('bb-ui--note');
+    note.textContent = 'keep swinging.';
     ui.hidden = false;
     restoreBtn.focus({ preventScroll: true });
   }
@@ -801,6 +1176,8 @@
     cancelAnimationFrame(sim.raf);
     sim.timers.forEach(clearTimeout);
     ui.hidden = true;
+    cancelPress();
+    sim.hammer.el.remove();
 
     const { overlay, pieces } = sim;
     const done = () => {
@@ -816,7 +1193,7 @@
     // take the shortest way home: normalise each angle to (-π, π]
     for (const p of pieces) {
       const b = p.body;
-      let a = b.angle % (2 * Math.PI);
+      let a = p.intact ? (p.tilt || 0) : b.angle % (2 * Math.PI);
       if (a > Math.PI) a -= 2 * Math.PI;
       if (a < -Math.PI) a += 2 * Math.PI;
       p.el.style.transform = `translate(${b.position.x - p.w / 2}px, ${b.position.y - p.h / 2}px) rotate(${a}rad)`;

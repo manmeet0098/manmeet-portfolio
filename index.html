@@ -413,6 +413,28 @@
     from { transform: scale(0.1); opacity: 0.55; }
     to { transform: scale(1); opacity: 0; }
   }
+  /* cracks stay in the page until it's built back; they spread outward from the blow */
+  .bb-cracks {
+    position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0;
+    overflow: visible; pointer-events: none;
+  }
+  .bb-cracks path { fill: none; stroke: var(--ink); stroke-linecap: round; stroke-linejoin: round; }
+  .bb-cracks path.bb-dent { fill: var(--ink); stroke: none; opacity: 0.5; }
+  /* the combo counter */
+  .bb-combo {
+    position: fixed; z-index: 61; pointer-events: none;
+    font-family: var(--mono); line-height: 1; letter-spacing: 0.02em; color: var(--flood);
+    text-shadow: 0 0 2px var(--paper), 0 0 6px var(--paper), 0 0 10px var(--paper);
+    transform: translate(-50%, -50%);
+    animation: bbCombo 0.8s ease-out forwards;
+  }
+  @keyframes bbCombo {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+    12% { opacity: 1; transform: translate(-50%, -50%) scale(1.3); }
+    25% { transform: translate(-50%, -50%) scale(1); }
+    70% { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -150%); }
+  }
   .bb-ui:not(.bb-ui--note) .bb-note { border: 0; padding: 2px 8px; margin-top: 6px; }
   .bb-overlay.bb-shake { animation: bbShake 0.26s linear; }
   @keyframes bbShake {
@@ -745,11 +767,27 @@
     setTimeout(() => { if (state === 'broken' && sim) impact(x, y, p, touch); }, SWING_MS);
   }
 
+  // combos: solid hits less than COMBO_MS apart build a streak, and each one in a row hits harder
+  const COMBO_MS = 1200;
+  let combo = 0, lastHit = 0, comboEl = null;
+
   function impact(x, y, p, touch) {
-    const res = sim.slam(x, y, p, touch);
+    const now = performance.now();
+    const streak = now - lastHit < COMBO_MS ? combo : 0;     // hits already in a row
+    const power = 1 + Math.min(streak, 6) * 0.12;
+    const res = sim.slam(x, y, p, touch, power);
     const solid = res.standing > 0 || !!res.whacked;
-    if (solid) sim.freezeUntil = performance.now() + 70;    // a beat of stillness sells the hit
-    shake(solid ? 7 : res.kicked ? 3 : 2);
+    if (solid) {
+      combo = streak + 1;
+      lastHit = now;
+      if (combo >= 2) comboPop(x, y, combo, touch);
+      sim.freezeUntil = now + 70 + Math.min(streak, 5) * 8;  // a beat of stillness sells the hit
+    } else if (!res.kicked) {
+      combo = 0;                                            // a clean miss ends the streak
+    }
+    shake((solid ? 7 : res.kicked ? 3 : 2) * power);
+    const grow = solid ? 1 + Math.min(streak, 8) * 0.3 : 1;   // each hit in a combo cracks the page wider
+    crack(x, y, (solid ? 1.1 : res.kicked ? 0.9 : 0.75) * grow);
     const fx = document.createElement('div');
     fx.className = 'bb-impact';
     fx.style.left = x + 'px';
@@ -759,9 +797,9 @@
     document.body.appendChild(fx);
     if (solid) {                           // a shockwave ring on anything that actually got hit
       const ring = document.createElement('div');
+      const d = Math.round(130 * power);
       ring.className = 'bb-ring';
-      ring.style.left = x + 'px';
-      ring.style.top = y + 'px';
+      ring.style.cssText = `left:${x}px;top:${y}px;width:${d}px;height:${d}px;margin:${-d / 2}px 0 0 ${-d / 2}px`;
       ring.addEventListener('animationend', () => ring.remove());
       document.body.appendChild(ring);
     }
@@ -769,7 +807,98 @@
     const colour = !src ? '#d9d3c5'
       : src.kind === 'word' ? src.el.style.color
       : src.kind === 'rule' ? src.el.style.background : '#6e6960';
-    chips(x, y, colour, solid ? 16 : res.kicked ? 8 : 4);
+    chips(x, y, colour, Math.round((solid ? 16 : res.kicked ? 8 : 4) * power));
+  }
+
+  function comboPop(x, y, n, touch) {
+    if (comboEl) comboEl.remove();
+    const el = comboEl = document.createElement('div');
+    el.className = 'bb-combo';
+    el.textContent = '\u00d7' + n;
+    // beside the blow, clear of the hammer (and of the finger on touch screens)
+    const left = touch ? (x - 52 > 30 ? x - 52 : x + 84) : x + 36;
+    el.style.left = Math.min(innerWidth - 30, Math.max(30, left)) + 'px';
+    el.style.top = Math.min(innerHeight - 30, Math.max(30, touch ? y - 36 : y + 44)) + 'px';
+    el.style.fontSize = Math.min(15 + (n - 2) * 3, 33) + 'px';
+    el.addEventListener('animationend', () => { el.remove(); if (comboEl === el) comboEl = null; });
+    document.body.appendChild(el);
+  }
+
+  // Cracks stay in the page until it's built back. Each one is drawn at full size up front and
+  // revealed from the middle out, so a bigger hit, or another hit on the same spot, makes the
+  // same crack spread further (instead of piling new cracks on top of each other).
+  const CRACK_MAX = 1.1 * (1 + 8 * 0.3);     // as big as the biggest combo makes it
+  const CRACK_NEAR = 25;                      // a hit this close to a crack's centre grows that crack
+  let crackId = 0;
+  const f1 = (n) => n.toFixed(1);
+  function dentPath(x, y, r) {
+    let d = '';
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2, rr = r * (0.6 + Math.random() * 0.6);
+      d += `${i ? 'L' : 'M'}${f1(x + Math.cos(a) * rr)} ${f1(y + Math.sin(a) * rr)}`;
+    }
+    return d + 'Z';
+  }
+  function crack(x, y, size) {
+    const near = sim.crackList.find((c) => Math.hypot(c.x - x, c.y - y) < CRACK_NEAR);
+    if (near) return growCrack(near, Math.min(CRACK_MAX, Math.max(near.size + 0.35, size)));
+
+    // the whole crack: jagged rays with branches, and broken rings between the rays further out
+    const S = CRACK_MAX;
+    const rays = 8 + Math.floor(Math.random() * 3);
+    const a0 = Math.random() * Math.PI * 2;
+    const rings = [[], []];
+    let main = '', fine = '';
+    for (let i = 0; i < rays; i++) {
+      let a = a0 + (i / rays) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+      const segs = 3 + Math.floor(Math.random() * 2);
+      const step = ((12 + Math.random() * 26) * S) / segs;
+      let px = x + Math.cos(a) * 2, py = y + Math.sin(a) * 2;
+      main += `M${f1(px)} ${f1(py)}`;
+      for (let k = 0; k < segs; k++) {
+        a += (Math.random() - 0.5) * 0.8;
+        px += Math.cos(a) * step;
+        py += Math.sin(a) * step;
+        main += `L${f1(px)} ${f1(py)}`;
+        if (k === 1) rings[0].push([px, py]);
+        if (k === 2) rings[1].push([px, py]);
+        if ((k === 0 || k === 2) && Math.random() < 0.5) {
+          const b = a + (Math.random() < 0.5 ? -1 : 1) * (0.5 + Math.random() * 0.6);
+          const bl = step * (0.4 + Math.random() * 0.5);
+          fine += `M${f1(px)} ${f1(py)}l${f1(Math.cos(b) * bl)} ${f1(Math.sin(b) * bl)}`;
+        }
+      }
+    }
+    for (const pts of rings) {
+      pts.forEach(([ax, ay], i) => {
+        if (Math.random() < 0.4) return;
+        const [bx, by] = pts[(i + 1) % pts.length];
+        fine += `M${f1(ax)} ${f1(ay)}L${f1((ax + bx) / 2 + (Math.random() - 0.5) * 4)} ${f1((ay + by) / 2 + (Math.random() - 0.5) * 4)}L${f1(bx)} ${f1(by)}`;
+      });
+    }
+    const id = 'bb-crack-' + ++crackId;
+    sim.cracks.insertAdjacentHTML('beforeend',
+      `<g opacity="0.6"><mask id="${id}"><circle cx="${f1(x)}" cy="${f1(y)}" r="0" fill="url(#bb-crack-fade)"/></mask>` +
+      `<path class="bb-dent"/><g mask="url(#${id})"><path class="bb-main" d="${main}"/><path stroke-width="0.7" d="${fine}"/></g></g>`);
+    const el = sim.cracks.lastElementChild;
+    const c = { x, y, size: 0, el, circle: el.querySelector('circle'), dent: el.querySelector('.bb-dent'), main: el.querySelector('.bb-main') };
+    sim.crackList.push(c);
+    if (sim.crackList.length > 60) sim.crackList.shift().el.remove();
+    growCrack(c, size);
+  }
+  // spread a crack out to `size`: the reveal widens over 150ms, the lines get a little heavier
+  function growCrack(c, size) {
+    const from = +c.circle.getAttribute('r'), to = 30 * size;
+    c.size = size;
+    c.dent.setAttribute('d', dentPath(c.x, c.y, 1.4 + 0.8 * size));
+    c.main.setAttribute('stroke-width', f1(0.9 + 0.3 * size));
+    const t0 = performance.now();
+    const tween = (now) => {
+      const k = Math.min(1, (now - t0) / 150);
+      c.circle.setAttribute('r', f1(from + (to - from) * (1 - (1 - k) ** 3)));
+      if (k < 1) requestAnimationFrame(tween);
+    };
+    requestAnimationFrame(tween);
   }
 
   function shake(px) {
@@ -883,6 +1012,8 @@
     const overlay = document.createElement('div');
     overlay.className = 'bb-overlay bb-shake has-hammer';
     overlay.setAttribute('aria-hidden', 'true');
+    overlay.innerHTML = '<svg class="bb-cracks" aria-hidden="true"><defs><radialGradient id="bb-crack-fade">' +
+                        '<stop offset="0.7" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient></defs></svg>';
     for (const p of pieces) {
       p.el.style.width = p.w + 'px';
       p.el.style.height = p.h + 'px';
@@ -944,29 +1075,32 @@
       }, delay));
     }
 
+    // hits add up, so cap the speed: hard enough to fly, never hard enough to leave for good
+    const fling = (b, vx, vy) => Body.setVelocity(b, { x: Math.max(-14, Math.min(14, vx)), y: Math.max(-22, vy) });
     // knock a standing piece loose: a pop up and away from where the hammer landed
-    const loosen = (p, hx) => {
+    const loosen = (p, hx, vf) => {
       p.intact = false;
       p.live = true;
       const away = Math.max(-1, Math.min(1, (p.x + p.w / 2 - hx) / 40));
       Body.setAngle(p.body, p.tilt || 0);
       Composite.add(engine.world, p.body);
-      Body.setVelocity(p.body, { x: away * 4 + (Math.random() - 0.5), y: -(5 + Math.random() * 4) });
+      fling(p.body, (away * 4 + (Math.random() - 0.5)) * vf, -(5 + Math.random() * 4) * vf);
       Body.setAngularVelocity(p.body, (Math.random() - 0.5) * (p.kind === 'rule' ? 0.02 : 0.25));
       p.el.classList.add('is-loose');
       p.el.style.zIndex = '2';
     };
     // a blow loosens the standing piece it lands on (plus anything within r px), sends a fallen
     // piece under the hammer flying, and kicks the debris around it
-    const slam = (x, y, target, touch) => {
-      const r = touch ? 20 : 16, R = touch ? 140 : 120;
+    const slam = (x, y, target, touch, power = 1) => {
+      const vf = 1 + (power - 1) * 0.6;
+      const r = (touch ? 20 : 16) * (1 + (power - 1) * 0.5), R = (touch ? 140 : 120) * power;
       const res = { standing: 0, whacked: null, kicked: 0 };
       const fresh = new Set();
       for (const p of pieces) {
         if (!p.intact) continue;
         const dx = Math.max(p.x - x, 0, x - (p.x + p.w));
         const dy = Math.max(p.y - y, 0, y - (p.y + p.h));
-        if (p === target || dx * dx + dy * dy <= r * r) { loosen(p, x); fresh.add(p); res.standing++; }
+        if (p === target || dx * dx + dy * dy <= r * r) { loosen(p, x, vf); fresh.add(p); res.standing++; }
       }
       for (const p of pieces) {
         if (p.intact || !p.live || fresh.has(p)) continue;
@@ -979,7 +1113,7 @@
         const away = Math.max(-1, Math.min(1, (b.position.x - x) / 40));
         Sleeping.set(b, false);
         if (p === target) {
-          Body.setVelocity(b, { x: (away * 5 + (Math.random() - 0.5) * 4) * k, y: -(14 + Math.random() * 4) * k });
+          fling(b, (away * 5 + (Math.random() - 0.5) * 4) * k, -(14 + Math.random() * 4) * k * vf);
           Body.setAngularVelocity(b, (Math.random() - 0.5) * (p.kind === 'rule' ? 0.04 : 0.35));
           // for a moment it passes through the other debris, so it flies out of the pile
           b.collisionFilter.mask = WALLS;
@@ -987,7 +1121,7 @@
           res.whacked = p;
         } else {
           const f = 1 - d / R;
-          Body.setVelocity(b, { x: b.velocity.x + away * 6 * f * k, y: Math.min(b.velocity.y, 0) - (4 + 8 * f) * k });
+          fling(b, b.velocity.x + away * 6 * f * k * vf, Math.min(b.velocity.y, 0) - (4 + 8 * f) * k * vf);
           Body.setAngularVelocity(b, b.angularVelocity + (Math.random() - 0.5) * 0.2 * f);
           res.kicked++;
         }
@@ -1030,13 +1164,17 @@
       for (const p of pieces) {
         if (p.intact) continue;
         const b = p.body;
+        if (b.position.x < 0 || b.position.x > vw || b.position.y > vh + Math.max(40, p.h)) {   // sunk into a wall or the floor
+          Body.setPosition(b, { x: Math.min(vw - 40, Math.max(40, b.position.x)), y: -60 });  // escaped: drop it back in
+          Body.setVelocity(b, { x: 0, y: 0 });
+        }
         p.el.style.transform =
           `translate(${b.position.x - p.w / 2}px, ${b.position.y - p.h / 2}px) rotate(${b.angle}rad)`;
       }
       sim.hammer.frame(now, !!mouseAt && mouseAt.inside && !overlay.classList.contains('is-dragging'));
       sim.raf = requestAnimationFrame(tick);
     };
-    sim = { overlay, pieces, timers, slam, grab: grabPiece, drop: (e) => mouse.mouseup(e), freezeUntil: 0,
+    sim = { overlay, cracks: overlay.querySelector('.bb-cracks'), crackList: [], pieces, timers, slam, grab: grabPiece, drop: (e) => mouse.mouseup(e), freezeUntil: 0,
             hammer: deskHammer(), byEl: new Map(pieces.map((p) => [p.el, p])),
             raf: requestAnimationFrame(tick) };
     if (mouseAt) mouseAt.inside = true;     // the hammer starts wherever the mouse already is
@@ -1178,6 +1316,8 @@
     ui.hidden = true;
     cancelPress();
     sim.hammer.el.remove();
+    combo = 0;
+    if (comboEl) comboEl.remove();
 
     const { overlay, pieces } = sim;
     const done = () => {
